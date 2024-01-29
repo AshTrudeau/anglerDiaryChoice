@@ -1,0 +1,159 @@
+---
+title: "anglerDiaryChoice"
+output: html_document
+date: "2024-01-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(tidyverse, lubridate, here, apollo)
+```
+
+Read in angler diary data, add column specifying inland lake, river, or great lakes
+Classifying impoundments/riverine lakes as inland lakes. 
+
+Sets of choice models: 
+- Participation (each day of month--fish or no fish)
+- For those participating: Waterbody type (inland lake, great lake, river)
+- For those fishing inland lakes: target species (walleye, bluegill, something else)
+- For those fishing walleye and/or bluegill: fishing site
+This last one will need some iterating. Try: 
+- as cross nested model: Distance and species presence (identifiable inland lakes--diary data)
+  - Compare to DCE estimates: only distance and species presence (non-zero expected catch rate)
+- separate models for first fishing trip recorded and later trips
+- latent classes (no covariates?)
+
+
+"Coastal" counties are counties touching, Lake Superior, Lake Michigan, or the Mississippi or Wisconsin rivers. (Rivers (sort of) account for the Driftless area, which has few inland lakes)
+
+```{r}
+`%!in%`<-Negate(`%in%`)
+
+codes<-read_csv(here::here("data","coding.csv"))%>%
+  select(code, `Target Species`, category)%>%
+  rename("TargetSpecies"=code,
+         "TargetSpeciesName"=`Target Species`, 
+         "TargetSpeciesCat"=category)
+
+coastal<-read_csv(here::here("data", "coastalCounties.csv"))
+
+anglerInfo<-read_csv(here::here("data","angler_info.csv"))
+
+
+diaryDataWaterbody<-read_csv(here::here("data","angler.diary.data.csv"))%>%
+    arrange(SurveyID)%>%
+  mutate(daysMonth=ifelse(Month%in%c(9,4,6,11), 30, 
+                          ifelse(Month==2, 28, 31)),
+         date_month=as.numeric(month(mdy(Date))),
+         outsideMonth=ifelse(FishedYN==1 & date_month!=Month,1,0),
+         Year=ifelse(Month%in%c(4,5,6,7,8,9,10,11,12), 2021, 2022))%>%
+  # remove entries where participants went fishing outside the sampled calendar month
+  filter(outsideMonth==0)%>%
+  filter(Mode==1)%>%
+  filter(SurveyID!="999999")%>%
+  filter(SurveyID%!in%c(1:10))%>%
+  group_by(SurveyID, Date)%>%
+  # for now, removing second or third trips within the same day and angler. Relatively low sample (229) and would require re-working model approach. 
+  # still, missed opportunity to capture 'lake surfing'. Think about it some more. One angler went to 5 different lakes!
+  mutate(lakeNum=row_number())%>%
+  # removing additional lakes visited in 1 day
+  filter(lakeNum%!in%c(2:5))%>%
+  ungroup()%>%
+  left_join(codes, by="TargetSpecies")%>%
+  mutate(waterbodyType=ifelse(grepl("River",WaterFished), "river",
+                              ifelse(WaterFished%in%c("Lake Michigan", "Lake Superior"), "greatLake",
+                              "inlandLake")))%>%
+  left_join(anglerInfo, by="SurveyID")%>%
+  mutate(coastOrRiver=ifelse(PrimaryCounty%in%coastal$county, 1, 0))
+  # this is an ungainly number of columns. Cutting out catch and keep numbers for now. Can join it back by surveyID later
+  
+catchKeep<-diaryDataWaterbody%>%
+  select(SurveyID, BluegillNumCaught:OtherNumKeep)
+
+diaryData<-diaryDataWaterbody%>%
+  select(!BluegillNumCaught:OtherNumKeep)
+
+```
+
+Now start filtering out entries that don't have the county of the waterFished
+
+```{r}
+noCounty<-diaryData%>%
+  mutate(noCounty=ifelse(County=="99" | WaterFished=="99",1,0))%>%
+  group_by(SurveyID)%>%
+  summarize(nNoCounty=sum(noCounty))%>%
+  filter(nNoCounty>0)%>%
+  ungroup()
+
+diaryData.f<-filter(diaryData, SurveyID%!in%noCounty$SurveyID)%>%
+  select(!c(Gender, YearOfBirth, Residency, PrimaryCounty, "Letter Version", BRM, Responded, Fished))
+
+```
+
+Not everyone labeled their target species, so check that before moving to next step of modeling
+
+Check that I don't have duplicates or multiple months
+11593 unique surveyIDs, neither spanning multiple months
+
+```{r}
+uniqueID<-distinct(diaryData.f[,c("SurveyID","Month","Year","daysMonth")])
+# some data spreads across more than one month. That's fine I guess. But check on those
+# Update: it was not, but now fixed. Survey was meant to take place over 1 calendar month. 
+ check<-uniqueID%>%
+   group_by(SurveyID)%>%
+   summarize(nMonth=length(unique(Month)))
+
+```
+
+Spread the data to record angler decisions to fish (or not) each day of the diary month
+
+```{r}
+
+fished<-filter(diaryDataWaterbody, FishedYN==1)
+noFished<-filter(diaryDataWaterbody, FishedYN==2)
+
+dataSpread<-uniqueID%>%
+  left_join(anglerInfo, by="SurveyID")%>%
+    slice(rep(1:n(), times=daysMonth))%>%
+  group_by(SurveyID)%>%
+  mutate(day=row_number())%>%
+  ungroup()%>%
+  # add a date column by pasting month, day, year
+  # previously messed up dates
+  mutate(Date=paste(Diary_Month, day, Year, sep="/"))%>%
+  # indicator for if they fished at all that month
+  mutate(fishedEver=ifelse(SurveyID%in%fished$SurveyID, 1, ifelse(SurveyID%in%noFished$SurveyID, 0, "error")))%>%
+  select(!c("Month","Year","Diary_Month", "daysMonth"))%>%
+  left_join(diaryData.f, by=c("SurveyID", "Date"))%>%
+  # FishedYN now only has 1 or NA (and 1 incorrect 2 on a day recorded fishing)
+  mutate(FishedYN=ifelse(FishedYN%in%c(1,2), 1, 0))%>%
+  # remove columns we don't need
+  select(!c(day, ID, Mode, Month, date_month, outsideMonth, Year))
+
+```
+Next add on weather data
+
+```{r}
+precip<-read_csv(here::here("data","precip.county.date.csv"))%>%
+  rename("County"=county)%>%
+  mutate(Date=mdy(Date),
+         year=year(Date))
+
+#choiceData<-left_join(dataSpread, precip, by=c("County", "Date"))
+
+# missing days?
+
+precipCheck<-precip%>%
+  group_by(County, year)%>%
+  summarize(nDays=length(unique(Date)))
+precipCheck
+```
+Ah. The work I did with precipitation data (angler diary data directory, nested.logit.wranging.Rmd) only got
+precipitation for all days fished. 
+
+```{r}
+choiceData<-dataSpread
+
+write.csv(choiceData, here::here("data","choice.data.participation.waterbody.type.csv"))
+```
+
