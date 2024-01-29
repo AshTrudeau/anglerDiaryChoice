@@ -1,0 +1,19 @@
+---
+title: "nested choice model"
+output: html_document
+date: "2024-01-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(tidyverse, here, lubridate, apollo)
+```
+
+This script reads in choice data from angler diaries, fits nested logit model predicting 
+fishing participation (yes, no) and type of waterbody (river, great lake, inland lake)
+
+```{r}
+choiceData<-read_csv(here::here("data","choice.data.participation.waterbody.type.csv"))
+choiceData<-choiceData[,-1]
+```
+

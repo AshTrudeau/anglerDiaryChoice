@@ -86,6 +86,7 @@ noCounty<-diaryData%>%
   ungroup()
 
 diaryData.f<-filter(diaryData, SurveyID%!in%noCounty$SurveyID)%>%
+  filter(Residency=="RESIDENT")%>%
   select(!c(Gender, YearOfBirth, Residency, PrimaryCounty, "Letter Version", BRM, Responded, Fished))
 
 ```
