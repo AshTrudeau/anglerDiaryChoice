@@ -6,7 +6,7 @@ date: "2024-01-29"
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-pacman::p_load(tidyverse, here, lubridate, apollo)
+pacman::p_load(tidyverse, here, lubridate, apollo, fastDummies)
 ```
 
 This script reads in choice data from angler diaries, fits nested logit model predicting 
@@ -15,5 +15,209 @@ fishing participation (yes, no) and type of waterbody (river, great lake, inland
 ```{r}
 choiceData<-read_csv(here::here("data","choice.data.participation.waterbody.type.csv"))
 choiceData<-choiceData[,-1]
+
+holidays<-mdy(c("05/31/2021","09/06/2021","11/25/2021","12/31/2021",
+                "01/17/2022"))
+
+coastal<-read_csv(here::here("data","coastalCounties.csv"))
+
+river<-coastal%>%
+  filter(grepl("River", waterbody))
+
+greatLake<-coastal%>%
+  filter(grepl("Lake", waterbody))
+
+
+choiceData.cov<-choiceData%>%
+  mutate(Date=mdy(Date),
+         month=as.character(month(Date, label=T)),
+         weekday=wday(Date, label=T),
+         weekendHoliday=ifelse(weekday%in%c("Sun","Sat") | Date%in%holidays, 1, 0),
+         coastal_greatLake=ifelse(PrimaryCounty%in%greatLake$county, 1, 0),
+         coastal_river=ifelse(PrimaryCounty%in%river$waterbody, 1, 0),
+         age=2022-YearOfBirth)%>%
+  select(SurveyID, age, PrimaryCounty, Date, fishedEver, FishedYN, WaterFished, County, Hours:waterbodyType,
+         coastal_greatLake, coastal_river, month, weekday, weekendHoliday)%>%
+  mutate(age.sc=scale(age, center=T, scale=T),
+         choice=ifelse(FishedYN==0, "noFish",
+                       ifelse(waterbodyType=="river", "river",
+                              ifelse(waterbodyType=="greatLake", "greatLake",
+                                     ifelse(waterbodyType=="inlandLake", "inlandLake","error")))))
+
+choiceData.dum<-dummy_cols(choiceData.cov, select_columns="month",
+                           remove_first_dummy=T,
+                           remove_selected_columns=T)
 ```
 
+
+
+```{r}
+# ################################################################# #
+#### LOAD LIBRARY AND DEFINE CORE SETTINGS                       ####
+# ################################################################# #
+
+
+### Initialise code
+apollo_initialise()
+
+### Set core controls
+apollo_control = list(
+  modelName       = "NL_participate_waterbodyType",
+  modelDescr      = "Nested logit participation and waterbody type",
+  indivID         = "SurveyID", 
+  outputDirectory = "output_Nested"
+)
+
+# ################################################################# #
+#### LOAD DATA AND APPLY ANY TRANSFORMATIONS                     ####
+# ################################################################# #
+
+### Loading data from package
+### if data is to be loaded from a file (e.g. called data.csv), 
+### the code would be: database = read.csv("data.csv",header=TRUE)
+database = choiceData.dum
+### for data dictionary, use ?apollo_modeChoiceData
+
+
+# ################################################################# #
+#### DEFINE MODEL PARAMETERS                                     ####
+# ################################################################# #
+
+### Vector of parameters, including any that are kept fixed in estimation. no observations in november, left out on purpose. 
+apollo_beta=c(b_fish_month_Feb=0,
+              b_fish_month_Mar=0,
+              b_fish_month_Apr=0,
+              b_fish_month_May=0,
+              b_fish_month_Jun=0,
+              b_fish_month_Jul=0,
+              b_fish_month_Aug=0,
+              b_fish_month_Sep=0,
+              b_fish_month_Oct=0,
+              # no November data
+              b_fish_month_Dec=0,
+              b_fish_holiday=0,
+              b_fish_age=0,
+              b_fish_age_holiday=0,
+              asc_fish=0,
+              asc_noFish=0,
+              b_greatLake_coastal=0,
+              b_river_coastal=0,
+              lambda_fish=1,
+              
+              )
+
+### Vector with names (in quotes) of parameters to be kept fixed at their starting value in apollo_beta, use apollo_beta_fixed = c() if none
+apollo_fixed = c("asc_noFish")
+
+# ################################################################# #
+#### GROUP AND VALIDATE INPUTS                                   ####
+# ################################################################# #
+
+apollo_inputs = apollo_validateInputs()
+
+# ################################################################# #
+#### DEFINE MODEL AND LIKELIHOOD FUNCTION                        ####
+# ################################################################# #
+
+apollo_probabilities=function(apollo_beta, apollo_inputs, functionality="estimate"){
+
+  ### Attach inputs and detach after function exit
+  apollo_attach(apollo_beta, apollo_inputs)
+  on.exit(apollo_detach(apollo_beta, apollo_inputs))
+
+  ### Create list of probabilities P
+  P = list()
+  
+  ### create alternative specific constants
+  
+  asc_fish_value=asc_fish + 
+    b_month_Feb * month_Feb + b_month_Mar * month_Mar + 
+    b_month_Apr * month_Apr + b_month_May * month_May + 
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + 
+    b_month_Aug * month_Aug + b_month_Sep * month_Sep + 
+    b_month_Oct * month_Oct + b_month_Dec * month_Dec +
+    b_age * age.sc + b_holiday * weekendHoliday +
+    b_age_holiday * age.sc * weekendHoliday
+  
+  b_river_value = b_river_coastal * coastal_river
+  b_greatLake_value = b_greatLake_coastal * coastal_greatLake
+
+  #  older people may be retired and more likely to fish on weekdays
+  
+
+  
+  ### List of utilities: these must use the same names as in mnl_settings, order is irrelevant
+  # no one completed a repeated visit to more than 8 waterbodies
+  
+  V = list()
+  V[["noFish"]] = asc_noFish
+  V[["river"]] = asc_fish_value + asc_fish_river + b_fish_river * c
+  V[["greatLake"]] = asc_fish_value + b_distance * distance_water_1 + b_prevCatch * prevCatch_water_1 
+  V[["inlandLake"]] = asc_fish_value + b_distance * distance_water_2 + b_prevCatch * prevCatch_water_2
+
+  # Specify  nests for NL model
+  
+  nlNests = list(root = 1,
+                 fish = lambda_fish)
+  
+  # specify tree structure for NL model
+  nlStructure = list()
+  nlStructure[["root"]] = c("noFish","fish")
+  nlStructure[["fish"]] = c("new_water","water_1","water_2","water_3","water_4",
+                            "water_5","water_6","water_8")
+  
+  nl_settings <-list(
+    alternatives = c(noFish="noFish", new_water="new_water", water_1="water_1",
+                     water_2="water_2", water_3="water_3", water_4="water_4", 
+                     water_5="water_5", water_6="water_6",
+                     water_8="water_8"),
+    avail = list(noFish=av_noFish, new_water=av_new_water, water_1=av_prevCatch_water_1,
+                 water_2=av_prevCatch_water_2, water_3=av_prevCatch_water_3,
+                 water_4=av_prevCatch_water_4, water_5=av_prevCatch_water_5,
+                 water_6=av_prevCatch_water_6,
+                 water_8=av_prevCatch_water_8),
+    utilities=V,
+    choiceVar = choice,
+    nlNests = nlNests,
+    nlStructure = nlStructure
+  )
+
+ ### Compute probabilities using NL model
+  P[["model"]] = apollo_nl(nl_settings, functionality)
+  
+  ### Take product across observation for same individual
+  P = apollo_panelProd(P, apollo_inputs, functionality)
+  
+  ### Prepare and return outputs of function
+  P = apollo_prepareProb(P, apollo_inputs, functionality)
+  return(P)
+}
+# ################################################################# #
+#### MODEL ESTIMATION                                            ####
+# ################################################################# #
+
+model = apollo_estimate(apollo_beta, apollo_fixed, apollo_probabilities, apollo_inputs)
+
+# ################################################################# #
+#### MODEL OUTPUTS                                               ####
+# ################################################################# #
+
+# ----------------------------------------------------------------- #
+#---- FORMATTED OUTPUT (TO SCREEN)                               ----
+# ----------------------------------------------------------------- #
+
+apollo_modelOutput(model)
+
+# ----------------------------------------------------------------- #
+#---- FORMATTED OUTPUT (TO FILE, using model name)               ----
+# ----------------------------------------------------------------- #
+
+saveOutput_settings=list(
+  printPVal=2
+)
+
+
+apollo_saveOutput(model, saveOutput_settings)
+
+
+```
