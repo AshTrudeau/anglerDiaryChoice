@@ -27,8 +27,34 @@ river<-coastal%>%
 greatLake<-coastal%>%
   filter(grepl("Lake", waterbody))
 
-
 choiceData.cov<-choiceData%>%
+  mutate(Date=mdy(Date),
+         month=as.character(month(Date, label=T)),
+         weekday=wday(Date, label=T),
+         weekendHoliday=ifelse(weekday%in%c("Sun","Sat") | Date%in%holidays, 1, 0),
+         coastal_greatLake=ifelse(PrimaryCounty%in%greatLake$county, 1, 0),
+         coastal_river=ifelse(PrimaryCounty%in%river$county, 1, 0),
+         age=2022-YearOfBirth)%>%
+  select(SurveyID, age, PrimaryCounty, Date, fishedEver, FishedYN, WaterFished, County, Hours:waterbodyType,
+         coastal_greatLake, coastal_river, month, weekday, weekendHoliday)%>%
+  mutate(age.sc=scale(age, center=T, scale=T),
+         choice.partic=ifelse(FishedYN==0, "noFish", "fish"),
+         choice.waterbody=ifelse(FishedYN==0, "noFish",
+                       ifelse(waterbodyType=="river", "river",
+                              ifelse(waterbodyType=="greatLake", "greatLake",
+                                     ifelse(waterbodyType=="inlandLake", "inlandLake","error")))),
+         choice=ifelse(fishedEver==0, "neverFished",
+                       ifelse(FishedYN==0, "notToday",
+                              ifelse(waterbodyType=="river","river",
+                                     ifelse(waterbodyType=="greatLake", "greatLake",
+                                            ifelse(waterbodyType=="inlandLake", "inlandLake", "error"))))),
+         age_weekend=age.sc*weekendHoliday)%>%
+  mutate(shoulder=ifelse(month%in%c("Oct","Nov","Mar","Apr"), 1, 0),
+         peakSummer=ifelse(month%in%c("May","Jun","Jul"), 1, 0))
+
+
+
+choiceData.cov.f<-choiceData%>%
   mutate(Date=mdy(Date),
          month=as.character(month(Date, label=T)),
          weekday=wday(Date, label=T),
@@ -50,6 +76,11 @@ choiceData.cov<-choiceData%>%
          peakSummer=ifelse(month%in%c("May","Jun","Jul"), 1, 0))
 
 choiceData.dum<-dummy_cols(choiceData.cov, select_columns="month",
+                           remove_first_dummy=F,
+                           remove_selected_columns=T)
+
+
+choiceData.dum.f<-dummy_cols(choiceData.cov.f, select_columns="month",
                            remove_first_dummy=F,
                            remove_selected_columns=T)
 ```
@@ -88,24 +119,22 @@ database = choiceData.dum
 ### Vector of parameters, including any that are kept fixed in estimation
 apollo_beta=c(asc_noFish=1,
               asc_fish=0,
-               #b_age=0,
                b_weekend_holiday=0,
-               b_shoulder=0,
-               b_peakSummer=0,
+              # b_shoulder=0,
+              # b_peakSummer=0,
                b_age=0,
-               b_age_weekend = 0
-               #b_age_weekend=0,
-              #  b_month_Feb=0,
-              #  b_month_Mar=0,
-              #  b_month_Apr=0,
-              #  b_month_May=0,
-              #  b_month_Jun=0,
-              #  b_month_Jul=0,
-              #  b_month_Aug=0,
-              #  b_month_Sep=0,
-              #  b_month_Oct=0,
-              # #  no November data
-              #  b_month_Dec=0
+               b_age_weekend = 0,
+                b_month_Feb=0,
+                b_month_Mar=0,
+                b_month_Apr=0,
+                b_month_May=0,
+                b_month_Jun=0,
+                b_month_Jul=0,
+                b_month_Aug=0,
+                b_month_Sep=0,
+                b_month_Oct=0,
+                # no November data
+                b_month_Dec=0
               )
 
 ### Vector with names (in quotes) of parameters to be kept fixed at their starting value in apollo_beta, use apollo_beta_fixed = c() if none
@@ -133,15 +162,12 @@ apollo_probabilities=function(apollo_beta, apollo_inputs, functionality="estimat
   ### List of utilities: these must use the same names as in mnl_settings, order is irrelevant
   V = list()
   V[["noFish"]]  = asc_noFish
-  V[["fish"]]  = asc_fish + b_weekend_holiday * weekendHoliday + b_shoulder * shoulder + 
-    b_peakSummer * peakSummer + b_age * age + b_age_weekend * age_weekend
+  V[["fish"]]  = asc_fish + b_weekend_holiday * weekendHoliday + b_month_Feb * month_Feb + 
+    b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
+    b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec +
+    b_age * age.sc + b_age_weekend * age_weekend
 
-  #+ 
-    # b_month_Feb * month_Feb + b_month_Mar * month_Mar + 
-    #  b_month_Apr * month_Apr + b_month_May + month_May + b_month_Jun + month_Jun + b_month_Jul + month_Jul +
-    #  b_month_Aug * month_Aug + b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec 
-  #+
-   #b_age * age + b_weekend_holiday * weekendHoliday + b_age_weekend * age_weekend
 
   
   ### Define settings for MNL model component
@@ -187,17 +213,10 @@ apollo_saveOutput(model)
 
 ```
 
-What if.. three level nested logit: 
-- Never fish
-- fish sometime
-  - not today
-  - fish today
-    - inland
-    - great lake
-    - river
 
 
-converged!
+
+converged! But still has the problem of a negative lambda value, which isn't allowed. Maybe this nesting structure isn't appropriate? 
 
 ```{r}
 # ################################################################# #
@@ -237,10 +256,19 @@ apollo_beta=c( asc_noFish=1,
               asc_greatLake=0,
               asc_inland=0,
               b_weekend_holiday=0,
-               #b_shoulder=0,
-               #b_peakSummer=0,
-               #b_age=0,
-               #b_age_weekend = 0,
+              #b_age=0,
+              #b_weekend_age=0,
+                b_month_Feb=0,
+                b_month_Mar=0,
+                b_month_Apr=0,
+                b_month_May=0,
+                b_month_Jun=0,
+                b_month_Jul=0,
+                b_month_Aug=0,
+                b_month_Sep=0,
+                b_month_Oct=0,
+                # no November data
+                b_month_Dec=0,
               b_coastal_greatLake=0,
               b_coastal_river=0,
               lambda_fish=1
@@ -279,10 +307,18 @@ apollo_probabilities=function(apollo_beta, apollo_inputs, functionality="estimat
 
   V = list()
   V[["noFish"]] = asc_noFish 
-  #+ b_shoulder * shoulder + b_peakSummer * peakSummer
-  V[["river"]] = asc_river_value + b_weekend_holiday * weekendHoliday
-  V[["greatLake"]] = asc_greatLake_value + b_weekend_holiday * weekendHoliday
-  V[["inlandLake"]] = asc_inland + b_weekend_holiday * weekendHoliday
+  V[["river"]] = asc_river_value + b_weekend_holiday * weekendHoliday + b_month_Feb * month_Feb + 
+    b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
+    b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec
+  V[["greatLake"]] = asc_greatLake_value + b_weekend_holiday * weekendHoliday + b_month_Feb * month_Feb + 
+    b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
+    b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec
+  V[["inlandLake"]] = asc_inland + b_weekend_holiday * weekendHoliday + b_month_Feb * month_Feb + 
+    b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
+    b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec
 
   # Specify  nests for NL model
   
@@ -341,6 +377,184 @@ apollo_saveOutput(model, saveOutput_settings)
 
 
 ```
-Hm. That didn't work. The data might just be too unbalanced since the vast majority of days are 'noFish'
+What if.. three level nested logit: 
+- Never fish
+- fish sometime
+  - not today
+  - fish today
+    - inland
+    - great lake
+    - river
+    
+    
+lambda values are still super weird. try constraining them
+```{r}
+# ################################################################# #
+#### LOAD LIBRARY AND DEFINE CORE SETTINGS                       ####
+# ################################################################# #
 
-Separate models? First logit for fishing or no, then filter to fishing days only to predict waterbody type?
+
+### Initialise code
+apollo_initialise()
+
+### Set core controls
+apollo_control = list(
+  modelName       = "NL_3_level",
+  modelDescr      = "Nested logit participation and waterbody type--3 level",
+  indivID         = "SurveyID", 
+  outputDirectory = "output_nested_3_level"
+)
+
+# ################################################################# #
+#### LOAD DATA AND APPLY ANY TRANSFORMATIONS                     ####
+# ################################################################# #
+
+### Loading data from package
+### if data is to be loaded from a file (e.g. called data.csv), 
+### the code would be: database = read.csv("data.csv",header=TRUE)
+database = choiceData.dum
+### for data dictionary, use ?apollo_modeChoiceData
+
+
+# ################################################################# #
+#### DEFINE MODEL PARAMETERS                                     ####
+# ################################################################# #
+
+### Vector of parameters, including any that are kept fixed in estimation. no observations in november, left out on purpose. 
+apollo_beta=c( asc_neverFished=1,
+               asc_notToday=1,
+              asc_river=0,
+              asc_greatLake=0,
+              asc_inland=0,
+              b_weekend_holiday=0,
+              #b_age=0,
+              #b_weekend_age=0,
+                b_month_Feb=0,
+                b_month_Mar=0,
+                b_month_Apr=0,
+                b_month_May=0,
+                b_month_Jun=0,
+                b_month_Jul=0,
+                b_month_Aug=0,
+                b_month_Sep=0,
+                b_month_Oct=0,
+                # no November data
+                b_month_Dec=0,
+              b_coastal_greatLake=0,
+              b_coastal_river=0,
+              lambda_fished=1,
+              lambda_today=1
+              
+              )
+
+### Vector with names (in quotes) of parameters to be kept fixed at their starting value in apollo_beta, use apollo_beta_fixed = c() if none
+apollo_fixed = c("asc_neverFished")
+
+# ################################################################# #
+#### GROUP AND VALIDATE INPUTS                                   ####
+# ################################################################# #
+
+apollo_inputs = apollo_validateInputs()
+
+# ################################################################# #
+#### DEFINE MODEL AND LIKELIHOOD FUNCTION                        ####
+# ################################################################# #
+
+apollo_probabilities=function(apollo_beta, apollo_inputs, functionality="estimate"){
+
+  ### Attach inputs and detach after function exit
+  apollo_attach(apollo_beta, apollo_inputs)
+  on.exit(apollo_detach(apollo_beta, apollo_inputs))
+
+  ### Create list of probabilities P
+  P = list()
+  
+  ### create alternative specific constants
+  
+  asc_river_value = asc_river + b_coastal_river * coastal_river 
+  asc_greatLake_value = asc_greatLake + b_coastal_greatLake * coastal_greatLake 
+
+  
+  ### List of utilities: these must use the same names as in mnl_settings, order is irrelevant
+
+  V = list()
+  V[["neverFished"]] = asc_neverFished
+  V[["notToday"]] = asc_notToday
+  V[["river"]] = asc_river_value + b_weekend_holiday * weekendHoliday + b_month_Feb * month_Feb + 
+    b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
+    b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec
+  V[["greatLake"]] = asc_greatLake_value + b_weekend_holiday * weekendHoliday + b_month_Feb * month_Feb + 
+    b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
+    b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec
+  V[["inlandLake"]] = asc_inland + b_weekend_holiday * weekendHoliday + b_month_Feb * month_Feb + 
+    b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
+    b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec
+
+  # Specify  nests for NL model
+  
+  nlNests = list(root = 1,
+                 fished = lambda_fished,
+                 today = lambda_today)
+  
+  # specify tree structure for NL model
+  nlStructure = list()
+  nlStructure[["root"]] = c("neverFished","fished")
+  nlStructure[["fished"]] = c("notToday", "today")
+  nlStructure[["today"]] = c("river","greatLake","inlandLake")
+  
+  nl_settings <-list(
+    alternatives = c(neverFished="neverFished", notToday="notToday", river="river", 
+                     inlandLake="inlandLake", greatLake="greatLake"),
+    utilities=V,
+    choiceVar = choice,
+    nlNests = nlNests,
+    nlStructure = nlStructure
+  )
+
+ ### Compute probabilities using NL model
+  P[["model"]] = apollo_nl(nl_settings, functionality)
+  
+  ### Take product across observation for same individual
+  P = apollo_panelProd(P, apollo_inputs, functionality)
+  
+  ### Prepare and return outputs of function
+  P = apollo_prepareProb(P, apollo_inputs, functionality)
+  return(P)
+}
+# ################################################################# #
+#### MODEL ESTIMATION                                            ####
+# ################################################################# #
+
+model = apollo_estimate(apollo_beta, apollo_fixed, apollo_probabilities, apollo_inputs)
+
+# ################################################################# #
+#### MODEL OUTPUTS                                               ####
+# ################################################################# #
+
+# ----------------------------------------------------------------- #
+#---- FORMATTED OUTPUT (TO SCREEN)                               ----
+# ----------------------------------------------------------------- #
+
+apollo_modelOutput(model)
+
+# ----------------------------------------------------------------- #
+#---- FORMATTED OUTPUT (TO FILE, using model name)               ----
+# ----------------------------------------------------------------- #
+
+saveOutput_settings=list(
+  printPVal=2
+)
+
+
+apollo_saveOutput(model, saveOutput_settings)
+
+apollo_sink()
+```
+lambda values (nesting parameters) are out of control. Constraining it didn't help and isn't advisable anyway
+
+
+suggestion to instead try mixed logit for panel data https://www.statalist.org/forums/forum/general-stata-discussion/general/1569500-nested-logit-with-panel-data 
+    
