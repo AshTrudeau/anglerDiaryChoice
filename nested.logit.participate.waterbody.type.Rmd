@@ -213,6 +213,150 @@ apollo_saveOutput(model)
 
 ```
 
+Instead of nested logit (tried below--problems with nesting parameter), trying normal MNL with covariates.
+If that works out, try MMNL
+
+```{r}
+# ################################################################# #
+#### LOAD LIBRARY AND DEFINE CORE SETTINGS                       ####
+# ################################################################# #
+
+
+### Initialise code
+apollo_initialise()
+
+### Set core controls
+apollo_control = list(
+  modelName       = "MNL_participate_waterbodyType",
+  modelDescr      = "MNL participation and waterbody type",
+  indivID         = "SurveyID", 
+  outputDirectory = "output_mnl_fish_waterbody"
+)
+
+# ################################################################# #
+#### LOAD DATA AND APPLY ANY TRANSFORMATIONS                     ####
+# ################################################################# #
+
+### Loading data from package
+### if data is to be loaded from a file (e.g. called data.csv), 
+### the code would be: database = read.csv("data.csv",header=TRUE)
+database = choiceData.dum
+### for data dictionary, use ?apollo_modeChoiceData
+
+
+# ################################################################# #
+#### DEFINE MODEL PARAMETERS                                     ####
+# ################################################################# #
+
+### Vector of parameters, including any that are kept fixed in estimation. no observations in november, left out on purpose. 
+apollo_beta=c( asc_noFish=0,
+               asc_fish=0,
+              b_weekend_holiday=0,
+              b_age=0,
+              b_weekend_age=0,
+                b_month_Feb=0,
+                b_month_Mar=0,
+                b_month_Apr=0,
+                b_month_May=0,
+                b_month_Jun=0,
+                b_month_Jul=0,
+                b_month_Aug=0,
+                b_month_Sep=0,
+                b_month_Oct=0,
+                # no November data
+                b_month_Dec=0,
+              b_coastal_greatLake=0,
+              b_coastal_river=0
+
+              )
+
+### Vector with names (in quotes) of parameters to be kept fixed at their starting value in apollo_beta, use apollo_beta_fixed = c() if none
+apollo_fixed = c("asc_noFish")
+
+# ################################################################# #
+#### GROUP AND VALIDATE INPUTS                                   ####
+# ################################################################# #
+
+apollo_inputs = apollo_validateInputs()
+
+# ################################################################# #
+#### DEFINE MODEL AND LIKELIHOOD FUNCTION                        ####
+# ################################################################# #
+
+apollo_probabilities=function(apollo_beta, apollo_inputs, functionality="estimate"){
+
+  ### Attach inputs and detach after function exit
+  apollo_attach(apollo_beta, apollo_inputs)
+  on.exit(apollo_detach(apollo_beta, apollo_inputs))
+
+  ### Create list of probabilities P
+  P = list()
+  
+  ### create alternative specific constants
+  
+  asc_fish_value = asc_fish + b_weekend_holiday * weekendHoliday + b_month_Feb * month_Feb + 
+    b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
+    b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
+    b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec +
+    b_age * age.sc + b_weekend_age * age_weekend
+  
+  ### List of utilities: these must use the same names as in mnl_settings, order is irrelevant
+
+  V = list()
+  V[["noFish"]] = asc_noFish 
+  V[["river"]] = asc_fish_value + b_coastal_river * coastal_river
+  V[["greatLake"]] = asc_fish_value + b_coastal_greatLake * coastal_greatLake
+  V[["inlandLake"]] = asc_fish_value
+
+ ### Define settings for MNL model component
+  mnl_settings = list(
+    alternatives = c(noFish="noFish",river="river",greatLake="greatLake",inlandLake="inlandLake"),
+    choiceVar    = choice.waterbody,
+    utilities    = V
+  )
+  
+  ### Compute probabilities using MNL model
+  P[["model"]] = apollo_mnl(mnl_settings, functionality)
+  
+  ### Take product across observation for same individual
+  P = apollo_panelProd(P, apollo_inputs, functionality)
+  
+  ### Prepare and return outputs of function
+  P = apollo_prepareProb(P, apollo_inputs, functionality)
+  return(P)
+}
+
+# ################################################################# #
+#### MODEL ESTIMATION                                            ####
+# ################################################################# #
+
+model = apollo_estimate(apollo_beta, apollo_fixed, apollo_probabilities, apollo_inputs)
+
+# ################################################################# #
+#### MODEL OUTPUTS                                               ####
+# ################################################################# #
+
+# ----------------------------------------------------------------- #
+#---- FORMATTED OUTPUT (TO SCREEN)                               ----
+# ----------------------------------------------------------------- #
+
+apollo_modelOutput(model)
+
+# ----------------------------------------------------------------- #
+#---- FORMATTED OUTPUT (TO FILE, using model name)               ----
+# ----------------------------------------------------------------- #
+
+apollo_saveOutput(model)
+
+# ################################################################# #
+##### POST-PROCESSING                                            ####
+# ################################################################# #
+
+### Print outputs of additional diagnostics to new output file (remember to close file writing when complete)
+apollo_sink()
+```
+
+
 
 
 
