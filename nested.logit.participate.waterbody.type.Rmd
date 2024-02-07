@@ -6,7 +6,7 @@ date: "2024-01-29"
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-pacman::p_load(tidyverse, here, lubridate, apollo, fastDummies)
+pacman::p_load(tidyverse, here, lubridate, apollo, fastDummies, RColorBrewer)
 ```
 
 This script reads in choice data from angler diaries, fits nested logit model predicting 
@@ -49,7 +49,7 @@ choiceData.cov<-choiceData%>%
          coastal_lakeMichigan=ifelse(PrimaryCounty%in%lakeMichigan$county, 1, 0),
          coastal_lakeSuperior=ifelse(PrimaryCounty%in%lakeSuperior$county, 1, 0),
          age=2022-YearOfBirth)%>%
-  select(SurveyID, age, PrimaryCounty, Date, fishedEver, FishedYN, WaterFished, County, Hours:waterbodyType,
+  select(SurveyID, age, Gender, PrimaryCounty, Date, fishedEver, FishedYN, WaterFished, County, Hours:waterbodyType,
          coastal_greatLake, coastal_river, coastal_lakeMichigan, coastal_lakeSuperior, month, weekday, weekendHoliday)%>%
   mutate(age.sc=scale(age, center=T, scale=T),
          choice.partic=ifelse(FishedYN==0, "noFish", "fish"),
@@ -67,14 +67,16 @@ choiceData.cov<-choiceData%>%
                                            ifelse(waterbodyType=="inlandLake", "inlandLake",
                                                   ifelse(WaterFished=="Lake Michigan", "lakeMichigan",
                                                          ifelse(WaterFished=="Lake Superior", "lakeSuperior", "error"))))),
-         age_weekend=age.sc*weekendHoliday)%>%
+         age_weekend=age.sc*weekendHoliday,
+         female=ifelse(Gender=="FEMALE", 1, 0))%>%
   mutate(shoulder=ifelse(month%in%c("Oct","Nov","Mar","Apr"), 1, 0),
          peakSummer=ifelse(month%in%c("May","Jun","Jul"), 1, 0))
 
 
 choiceData.dum<-dummy_cols(choiceData.cov, select_columns="month",
                            remove_first_dummy=F,
-                           remove_selected_columns=T)
+                           remove_selected_columns=T)%>%
+  filter(!is.na(female))
 
 ```
 
@@ -82,11 +84,12 @@ Troubleshooting weird negative relationship between living in a coastal county a
 
 ```{r}
 summary.nonspecific<-choiceData.cov%>%
-  group_by(choice.specificLake, coastal_greatLake)%>%
+  group_by(choice.specificLake, female)%>%
   summarize(n=n())
 summary.nonspecific
 ```
 in aggregate, it does look like coastal county anglers are more likely to fish their great lake, especially Superior. (I had it backwards, huh)
+Data with only anglers, for comparison (no non-participants)
 ```{r}
 
 choiceData.cov.f<-choiceData%>%
@@ -97,7 +100,7 @@ choiceData.cov.f<-choiceData%>%
          coastal_greatLake=ifelse(PrimaryCounty%in%greatLake$county, 1, 0),
          coastal_river=ifelse(PrimaryCounty%in%river$county, 1, 0),
          age=2022-YearOfBirth)%>%
-  select(SurveyID, age, PrimaryCounty, Date, fishedEver, FishedYN, WaterFished, County, Hours:waterbodyType,
+  select(SurveyID, age, Gender, PrimaryCounty, Date, fishedEver, FishedYN, WaterFished, County, Hours:waterbodyType,
          coastal_greatLake, coastal_river, month, weekday, weekendHoliday)%>%
   mutate(age.sc=scale(age, center=T, scale=T),
          choice.partic=ifelse(FishedYN==0, "noFish", "fish"),
@@ -155,6 +158,7 @@ apollo_beta=c(asc_noFish=1,
               # b_shoulder=0,
               # b_peakSummer=0,
                b_age=0,
+               b_female=0,
                b_age_weekend = 0,
                 b_month_Feb=0,
                 b_month_Mar=0,
@@ -198,7 +202,7 @@ apollo_probabilities=function(apollo_beta, apollo_inputs, functionality="estimat
     b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
     b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
     b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec +
-    b_age * age.sc + b_age_weekend * age_weekend
+    b_age * age.sc + b_age_weekend * age_weekend + b_female * female
 
 
   
@@ -283,8 +287,12 @@ database = choiceData.dum
 ### Vector of parameters, including any that are kept fixed in estimation. no observations in november, left out on purpose. 
 apollo_beta=c( asc_noFish=0,
                asc_fish=0,
+               asc_lakeMichigan=0,
+               asc_lakeSuperior=0,
+               asc_river=0,
               b_weekend_holiday=0,
               b_age=0,
+              b_female=0,
               b_weekend_age=0,
                 b_month_Feb=0,
                 b_month_Mar=0,
@@ -331,16 +339,19 @@ apollo_probabilities=function(apollo_beta, apollo_inputs, functionality="estimat
     b_month_Mar * month_Mar + b_month_Apr * month_Apr + b_month_May * month_May +
     b_month_Jun * month_Jun + b_month_Jul * month_Jul + b_month_Aug * month_Aug +
     b_month_Sep * month_Sep + b_month_Oct * month_Oct + b_month_Dec * month_Dec +
-    b_age * age.sc + b_weekend_age * age_weekend
+    b_age * age.sc + b_weekend_age * age_weekend + b_female * female
+  
+  asc_lakeMichigan_value = asc_lakeMichigan +b_coastal_lakeMichigan * coastal_lakeMichigan
+  asc_lakeSuperior_value = asc_lakeSuperior + b_coastal_lakeSuperior * coastal_lakeSuperior
   
   ### List of utilities: these must use the same names as in mnl_settings, order is irrelevant
 
   V = list()
   V[["noFish"]] = asc_noFish 
-  V[["river"]] = asc_fish_value + b_coastal_river * coastal_river
-  V[["lakeMichigan"]] =  asc_fish_value + b_coastal_lakeMichigan * coastal_lakeMichigan
-  V[["lakeSuperior"]] = asc_fish_value + b_coastal_lakeSuperior * coastal_lakeSuperior
-  V[["inlandLake"]] = asc_fish_value
+  V[["river"]] = asc_fish_value + asc_river + b_coastal_river * coastal_river
+  V[["lakeMichigan"]] =  asc_fish_value + asc_lakeMichigan_value 
+  V[["lakeSuperior"]] = asc_fish_value + asc_lakeSuperior_value 
+  V[["inlandLake"]] = asc_fish_value 
 
  ### Define settings for MNL model component
   mnl_settings = list(
@@ -389,47 +400,227 @@ apollo_saveOutput(model)
 ### Print outputs of additional diagnostics to new output file (remember to close file writing when complete)
 apollo_sink()
 ```
+Aha, adding ASCs for great lakes and rivers fixed the weird negative parameter value for coastal_lakeMichigan
 
-beta value of coastal_greatLake doesn't make sense to me--it's negative? 
-Actually, maybe it makes more sense to break up lake superior and michigan. They're
-very different form each other, and anglers in northern counties have lots of inland lakes
-to choose from. 
 
-Oh interesting! Breaking up Lake Superior and Michigan, coastal county residents of Lake Michigan were less likely, all else being equal, to choose fishing in Lake Michigan. 
+Predicting fishing effort using this model.
+
+I'm going to predict probabilities across a full year for an 'average' angler
+
+but first, predictions for the data I have
 
 ```{r}
-choiceData.dum%>%
-  group_by(coastal_lakeMichigan)%>%
-  mutate(total=n())%>%
-  ungroup()%>%
-  group_by(coastal_lakeMichigan, choice.specificLake)%>%
-  summarize(n=n(),
-            total=unique(total),
-            prop=n/total)
+model=apollo_loadModel("MNL_participate_waterbodyType")
+
+predictions_base = apollo_prediction(model, apollo_probabilities, apollo_inputs)
 ```
 
 
-```{r}
-coastalGreatLake<-choiceData.dum%>%
-  filter(coastal_greatLake==1)
+Plan: 
+- Make predictions of probs for a year assuming identical anglers
+- mess with ages--how much variation is there?
+- Work on (roughly) incorporating into sim model--how do I want to handle 'bins' for non-fishing, non-inland lake options? Assume that everyone in the sim made the choice to fish? Or include non-participation? (compare fits of full data vs. only participants)
+- Incorporate heterogeneity--add random component, look for correlations among (random) coefficients (regression approach)
+- Add individual heterogeneity into the model
+- Move on to lake choice--for those choosing inland lakes, adapt DCE estimates (run some test for how to deal with distance--straight line at some (slow) speed approaching actual travel distance? OR, place anglers at population centers, for which I have estimated distances to each lake? Start simple with random placement and straight line distance at slow speed. Then adapt angler population density from there)
 
-unique(coastalGreatLake$PrimaryCounty)
+
+```{r}
+predict_data<-data.frame(date=seq(mdy("1/1/2021"),mdy("12/31/2021"), by="days"))
+
+# eventually include a range of ages (repeated sims)
+pred_data_mean<-predict_data%>%
+  mutate(SurveyID=rep(1),
+         choice.specificLake=rep(NA),
+         day=wday(date, label=T),
+         month=month(date, label=T))%>%
+  dummy_cols(select_columns="month", remove_first_dummy=F, remove_selected_columns=T)%>%
+  mutate(weekendHoliday=ifelse(day%in%c("Sat","Sun") | date%in%holidays, 1, 0),
+         age.sc=rep(0),
+         age_weekend=weekendHoliday*age.sc,
+         coastal_lakeMichigan=0,
+         coastal_lakeSuperior=0,
+         coastal_river=0,
+         female=0)
+
+
+database<-pred_data_mean
+apollo_inputs=apollo_validateInputs()
+predictions_new=apollo_prediction(model, apollo_probabilities, apollo_inputs)
+```
+
+Plot probabilities over time
+
+```{r}
+predictions_pivot<-predictions_new%>%
+  pivot_longer(cols=c(noFish:inlandLake), names_to="choice",values_to="probChoice")
+
+ggplot(predictions_pivot)+
+  geom_line(aes(x=Observation, y=probChoice, color=choice))
+
+# ok, the expected seasonal pattern is there. Filter out prob noFish to look at different waterbodies
+
+predictions_fished<-predictions_pivot%>%
+  filter(choice!="noFish")
+
+ggplot(predictions_fished)+
+  geom_line(aes(x=Observation, y=probChoice, color=choice))
+
+```
+neat, but are those 0 probabilities for great lakes? 
+
+Make a prediction df for different ages and coastal/noncoastal counties
+
+```{r}
+anglerInland<-data.frame(SurveyID=c(1:3), age.sc=c(-1, 0, 1), coastal_lakeMichigan=0, coastal_lakeSuperior=0, coastal_river=0)
+anglerRiver<-data.frame(SurveyID=c(4:6), age.sc=c(-1, 0, 1), coastal_lakeMichigan=0, coastal_lakeSuperior=0, coastal_river=1)
+anglerMich<-data.frame(SurveyID=c(7:9), age.sc=c(-1, 0, 1), coastal_lakeMichigan=1, coastal_lakeSuperior=0, coastal_river=0)
+anglerSup<-data.frame(SurveyID=c(10:12), age.sc=c(-1, 0, 1), coastal_lakeMichigan=0, coastal_lakeSuperior=1, coastal_river=0)
+
+anglerSim.1<-rbind.data.frame(anglerInland, anglerRiver, anglerMich, anglerSup)%>%
+  mutate(female=1)
+
+anglerSim.2<-rbind.data.frame(anglerInland, anglerRiver, anglerMich, anglerSup)%>%
+  mutate(female=0)
+
+anglerSim<-rbind.data.frame(anglerSim.1, anglerSim.2)%>%
+  mutate(SurveyID=seq(1:nrow(anglerSim)))
+
+  # then repeat each row 365 times
+
+pred_data<-anglerSim%>%
+  slice(rep(1:n(), each=365))%>%
+  mutate(date=rep(seq(mdy("1/1/2021"),mdy("12/31/2021"), by="days"), length(unique(SurveyID))),
+         choice.specificLake=rep(NA),
+         day=wday(date, label=T),
+         month=month(date, label=T))%>%
+  dummy_cols(select_columns="month", remove_first_dummy=F, remove_selected_columns=F)%>%
+  mutate(weekendHoliday=ifelse(day%in%c("Sat","Sun") | date%in%holidays, 1, 0),
+         month_Mar=ifelse(month%in%c("Mar","Nov"), 1, 0),
+         age_weekend=weekendHoliday*age.sc)
+
+         # adding dummy indicator for March in November (no observations--other shoulder season
+
+database=pred_data
+apollo_inputs=apollo_validateInputs()
+predictions=apollo_prediction(model, apollo_probabilities, apollo_inputs)
+
+predictions_pivot<-predictions%>%
+  mutate(age.sc=pred_data$age.sc,
+         coastal_lakeMichigan=pred_data$coastal_lakeMichigan,
+         coastal_lakeSuperior=pred_data$coastal_lakeSuperior,
+         coastal_river=pred_data$coastal_river,
+         female=pred_data$female)%>%
+  pivot_longer(cols=c(noFish:inlandLake), names_to="choice", values_to="choiceProb")%>%
+  mutate(choice=as.factor(choice),
+         ID=as.factor(ID),
+         age=ifelse(age.sc==-1, "younger",
+                    ifelse(age.sc==0, "average", "older")),
+         residence=ifelse(coastal_lakeMichigan==1, "lakeMichigan",
+                          ifelse(coastal_lakeSuperior==1, "lakeSuperior",
+                                 ifelse(coastal_river==1, "river", "inland"))),
+         gender=ifelse(female==1, "female","male"))%>%
+  filter(choice!="noFish")
+
+ggplot(predictions_pivot)+
+  geom_line(aes(x=Observation, y=choiceProb, color=residence, linetype=age))+
+  scale_color_manual(values=brewer.pal(n=4, "Set1"))+
+  facet_grid(choice~gender)+
+  theme_bw()
+
+# wide format predictions
+predictions_cov<-predictions%>%
+  mutate(gender=ifelse(pred_data$female==1, "female", "male"),
+         age.sc=pred_data$age.sc,
+         coastal_lakeMichigan=pred_data$coastal_lakeMichigan,
+         coastal_lakeSuperior=pred_data$coastal_lakeSuperior,
+         coastal_river=pred_data$coastal_river)
+```
+Hard to parse age differences
+```{r}
+ggplot(predictions_pivot)+
+  geom_line(aes(x=Observation, y=choiceProb, color=age, linetype=residence))+
+  scale_color_manual(values=brewer.pal(n=4, "Set1"))+
+  facet_grid(choice~gender)+
+  theme_bw()
 
 
 ```
+yeah, age primarily drives distribution through the week (which makes sense; I didn't include it in waterbody type choice)
 
+So now see what that looks like in terms of fishign days/year. Say we have 800,000 licenses active in a year. 
+
+uhhh I can't find any of the DNR's social science reports, what? Ideally, I would like cross tabs of license sales by county, with breakdowns of age and gender.
+
+For now, I'll just use county populations from the Census, assuming similar participation rates across counties and 50/50 gender split. At some point, I need to get cross tabs of license sales data. (by county, age, gender) (gender more important than age if there are limitations)
 
 ```{r}
-summary<-choiceData.dum%>%
-  group_by(choice.waterbody, coastal_greatLake)%>%
+coastalCounties<-read_csv(here::here("data","coastalCounties.csv"))
+
+superior<-filter(coastalCounties, waterbody=="Lake Superior")
+michigan<-filter(coastalCounties, waterbody=="Lake Michigan")
+river<-filter(coastalCounties, waterbody%in%c("Mississippi River","Wisconsin River"))
+
+predictions_meanAge<-predictions_cov%>%
+  cbind.data.frame(dplyr::select(pred_data, month_Jan:month_Dec, weekendHoliday))
+
+predictions_distinct<-predictions_meanAge%>%
+  select(noFish:weekendHoliday)%>%
+  distinct()
+
+yearDates<-data.frame(date=seq(mdy("1/1/2021"),mdy("12/31/2021"), by="days"))%>%
+  mutate(month=month(date, label=T),
+         wday=wday(date, label=T),
+         weekendHoliday=ifelse(wday%in%c("Sat","Sun") | date%in%holidays, 1, 0))%>%
+  group_by(month, weekendHoliday)%>%
   summarize(n=n())
 
-summary
+gender<-rep(c("female","male"), 4)
+
+
+pop<-read_csv(here::here("data","county.pop.csv"))%>%
+  mutate(county=str_split_fixed(`Label (Grouping)`, " County,", 2)[,1])%>%
+  rename("population"=`Total population`)%>%
+  select(county, population)%>%
+  mutate(coastal_lakeSuperior=ifelse(county%in%superior$county, 1, 0),
+         coastal_lakeMichigan=ifelse(county%in%michigan$county, 1, 0),
+         coastal_river=ifelse(county%in%river$county, 1, 0))%>%
+  group_by(coastal_lakeSuperior, coastal_lakeMichigan, coastal_river)%>%
+  summarize(population=sum(population))%>%
+  ungroup()%>%
+  slice(rep(1:n(), each=2))%>%
+  mutate(gender=rep(c("female","male"), 4),
+         population=round(population/2),
+         age=rep(0),
+         stratumID=seq(1:8))%>%
+  # now slice so that each row (type of individual) is repeated for a year
+  
+  # this is where I left off; plan is to join probabilities of choice by month, weekendHoliday, coastal county, and gender. Then multiply prob by stratum population, multiply that by days in the stratum, and add across strata to get annual estimates
+  
+  slice(rep(1:n(), each=24))%>%
+  mutate(month=rep(yearDates$month, 8),
+         weekendHoliday=rep(yearDates$weekendHoliday, 8),
+         nDays=rep(yearDates$n, 8))
+  mutate(date=rep(yearDates, 8),
+         day=wday(date, label=T),
+         month=month(date, label=T))%>%
+  dummy_cols(select_columns="month", remove_first_dummy=F, remove_selected_columns=T)%>%
+  mutate(weekendHoliday=ifelse(day%in%c("Sat","Sun") | date%in%holidays, 1, 0))%>%
+  # to prep for the join, I now want to group counties by coastal/noncoastal and add up their total populations. That probably actually wants to happen earlier in this pipe
+  
+  
+  
+  # now join the choice probability predictions by month, weekendHoliday, coastal vars, and gender
+  left_join(predictions_distinct, by=c("month_Jan","month_Feb","month_Mar","month_Apr","month_May",
+                                       "month_Jun","month_Jul","month_Aug","month_Sep","month_Oct",
+                                       "month_Nov","month_Dec","weekendHoliday","coastal_lakeMichigan",
+                                       "coastal_lakeSuperior","coastal_river","gender"))
+
+# so let's expand pop into a year. Add dates, month, weekend/weekday
+
+
+
 ```
-
-
-Nested logit still has the problem of a negative lambda value, which isn't allowed.
-Yes, I'm going with this not being appropriate. Deleting nested model
 
 
 suggestion to instead try mixed logit for panel data https://www.statalist.org/forums/forum/general-stata-discussion/general/1569500-nested-logit-with-panel-data 
