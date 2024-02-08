@@ -80,16 +80,8 @@ choiceData.dum<-dummy_cols(choiceData.cov, select_columns="month",
 
 ```
 
-Troubleshooting weird negative relationship between living in a coastal county and fishing in the Great Lakes. Dividing Superior from Michigan may help, but let's visualize:
-
-```{r}
-summary.nonspecific<-choiceData.cov%>%
-  group_by(choice.specificLake, female)%>%
-  summarize(n=n())
-summary.nonspecific
-```
-in aggregate, it does look like coastal county anglers are more likely to fish their great lake, especially Superior. (I had it backwards, huh)
-Data with only anglers, for comparison (no non-participants)
+in aggregate, it does look like coastal county anglers are more likely to fish their great lake, especially Superior. 
+Data with only anglers, for comparison if needed (no non-participants)
 ```{r}
 
 choiceData.cov.f<-choiceData%>%
@@ -529,6 +521,7 @@ ggplot(predictions_pivot)+
   scale_color_manual(values=brewer.pal(n=4, "Set1"))+
   facet_grid(choice~gender)+
   theme_bw()
+ggsave(here::here("figures","choice.prob.sim.png"), height=12, width=16)
 
 # wide format predictions with covariates
 predictions_cov<-predictions%>%
@@ -571,6 +564,12 @@ inland<-3363612/total.obs
 great<-(155581+80351)/total
 inland
 great
+
+comparison.df<-data.frame(type=rep("observed"), 
+                          waterbodyType=c("Inland lakes","Lake Michigan", "Lake Superior", "Rivers"),
+                          nTrips=c(3363612, 155581, 80351, NA))%>%
+  mutate(totalTrips=sum(nTrips, na.rm=T),
+         propTrips=nTrips/totalTrips)
 ```
 model outputs (for fishing inland and great lakes) are about 98% inland, 2% great lakes. 
 
@@ -601,25 +600,19 @@ yearDates<-data.frame(date=seq(mdy("1/1/2021"),mdy("12/31/2021"), by="days"))%>%
 gender<-rep(c("female","male"), 4)
 
 
-
-pop<-read_csv(here::here("data","county.pop.csv"))%>%
-  mutate(county=str_split_fixed(`Label (Grouping)`, " County,", 2)[,1])%>%
-  rename("population"=`Total population`)%>%
-  select(county, population)%>%
-  mutate(coastal_lakeSuperior=ifelse(county%in%superior$county, 1, 0),
-         coastal_lakeMichigan=ifelse(county%in%michigan$county, 1, 0),
-         coastal_river=ifelse(county%in%river$county, 1, 0))%>%
-  group_by(coastal_lakeSuperior, coastal_lakeMichigan, coastal_river)%>%
-  # (for now) assuming 25% of county population has a license
-  summarize(population=sum(population)*0.25)%>%
+pop<-read_csv(here::here("data","license.sales.county.gender.csv"))%>%
+  filter(ProcessYear==2022)%>%
+  mutate(coastal_lakeSuperior=ifelse(PrimaryCounty%in%superior$county, 1, 0),
+         coastal_lakeMichigan=ifelse(PrimaryCounty%in%michigan$county, 1, 0),
+         coastal_river=ifelse(PrimaryCounty%in%river$county, 1, 0),
+         Gender=tolower(Gender))%>%
+  rename("gender"=Gender,
+         "county"=PrimaryCounty)%>%
+  group_by(gender, coastal_lakeSuperior, coastal_lakeMichigan, coastal_river)%>%
+  summarize(population=sum(Count))%>%
   ungroup()%>%
-  slice(rep(1:n(), each=2))%>%
-  mutate(gender=rep(c("female","male"), 4),
-         # population of anglers; i.e. rough guess that 25% of population hold license
-         population=round((population/2)*0.25),
-         age=rep(0),
+  mutate(age=rep(0),
          stratumID=seq(1:8))%>%
-  # now slice so that each row (type of individual) is repeated for a year
     slice(rep(1:n(), each=24))%>%
   mutate(month=rep(yearDates$month, 8),
          weekendHoliday=rep(yearDates$weekendHoliday, 8),
@@ -643,6 +636,8 @@ pop<-read_csv(here::here("data","county.pop.csv"))%>%
          nLakeSuperiorDays=nLatentDays*lakeSuperior,
          nInlandDays=nLatentDays*inlandLake)
 
+
+
 nLatent<-sum(pop$nLatentDays)
 nNoFish<-sum(pop$nNoFishingDays)
 nLakeMichigan<-sum(pop$nLakeMichiganDays)
@@ -650,16 +645,55 @@ nLakeSuperior<-sum(pop$nLakeSuperiorDays)
 nRiver<-sum(pop$nRiverDays)
 nInland<-sum(pop$nInlandDays)
 
-total<-nLakeMichigan+nLakeSuperior+nInland
-nInland/total
 
-# that's a lot of River effort predicted (734886 angler trips/year)
+comparison.df.2<-data.frame(type="predicted", 
+                            waterbodyType=comparison.df$waterbodyType,
+                            nTrips=c(nInland, nLakeMichigan, nLakeSuperior, nRiver))%>%
+  mutate(totalTrips=sum(nTrips, na.rm=T),
+         propTrips=nTrips/totalTrips)
+
+comparison.bind<-rbind.data.frame(comparison.df, comparison.df.2)
+
+comparison.df.3<-comparison.df%>%
+  filter(waterbodyType!="Rivers")
+comparison.df.4<-data.frame(type="predicted", 
+                            waterbodyType=comparison.df$waterbodyType[-4],
+                            nTrips=c(nInland, nLakeMichigan, nLakeSuperior))%>%
+  mutate(totalTrips=sum(nTrips, na.rm=T),
+         propTrips=nTrips/totalTrips)
+
+comparison.bind.noRiver<-rbind.data.frame(comparison.df.3, comparison.df.4)
+
 ```
+
+Graph of total trip numbers
+
+```{r}
+ggplot(comparison.bind)+
+  geom_bar(aes(x=waterbodyType, y=nTrips, fill=type), stat="identity", position=position_dodge())+
+  scale_fill_manual(values=brewer.pal(2, "Set1"))+
+  theme_bw()
+ggsave(here::here("figures","observed.vs.predicted.nTrips.png"), height=4, width=6)
+```
+and proportions for comparison
+
+```{r}
+ggplot(comparison.bind.noRiver)+
+  geom_bar(aes(x=type, y=propTrips, fill=waterbodyType), stat="identity")+
+  scale_fill_manual(values=brewer.pal(3, "Paired"))+
+  theme_bw()
+ggsave(here::here("figures","observed.vs.predicted.prop.png"), height=4, width=6)
+```
+
+
 Neat! Proportions predicted by the model are pretty similar (0.93 inland from model vs 0.95 inland from observations). Numbers are a bit off (lower in absolute terms), but proportion inland  vs great lakes is pretty similar. Predictions for the two great lakes are much more off--very, very low for Superior (0.06 of the observed effort), also low for Michigan (0.5 observed effort)
 
-So I'll want to revisit this with the improved license data. 
+The underprediction of Great Lakes might be associated with not including nonresidents. There was no way to separate resident and nonresident observations. The huge absolute difference in predicted vs observed inland fishing trips may be a result of nonresponse bias. License holders who rarely fish were probably less likely to send back the diary. 
+
 
 suggestion to instead try mixed logit for panel data https://www.statalist.org/forums/forum/general-stata-discussion/general/1569500-nested-logit-with-panel-data 
 
+Next step is to try fitting a more complex model that accounts for heterogeneity. Let's try MMNL
 
+But I"ll do that in a new script.
     
