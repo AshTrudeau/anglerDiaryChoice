@@ -6,7 +6,7 @@ date: "2024-02-07"
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-pacman::p_load(tidyverse, here, lubridate, apollo, fastDummies, RColorBrewer)
+pacman::p_load(tidyverse, here, lubridate, apollo, fastDummies)
 ```
 
 
@@ -115,14 +115,21 @@ database = choiceData.dum
 # ################################################################# #
 
 ### Vector of parameters, including any that are kept fixed in estimation. no observations in november, left out on purpose. 
-apollo_beta=c( mu_asc_noFish=0,
+apollo_beta=c( asc_noFish=0,
                mu_asc_fish=0,
+               sigma_asc_fish=1,
                mu_asc_lakeMichigan=0,
+               sigma_asc_lakeMichigan=1,
                mu_asc_lakeSuperior=0,
+               sigma_asc_lakeSuperior=1,
                mu_asc_river=0,
+               sigma_asc_river=1,
                mu_b_coastal_lakeMichigan=0,
+               sigma_b_coastal_lakeMichigan=1,
                mu_b_coastal_lakeSuperior=0,
+               sigma_b_coastal_lakeSuperior=1,
                mu_b_coastal_river=0,
+               sigma_b_coastal_river=1,
                b_weekend_holiday=0,
                b_age=0,
                b_female=0,
@@ -142,6 +149,42 @@ apollo_beta=c( mu_asc_noFish=0,
 
 ### Vector with names (in quotes) of parameters to be kept fixed at their starting value in apollo_beta, use apollo_beta_fixed = c() if none
 apollo_fixed = c("asc_noFish")
+
+# ################################################################# #
+#### DEFINE RANDOM COMPONENTS                                    ####
+# ################################################################# #
+
+# specifying normal distribution
+apollo_draws=list(
+  interDrawsType="pmc",
+  interNDraws=100,
+  interUnifDraws=c(),
+  interNormDraws=c("draws_asc_fish","draws_asc_lakeMichigan","draws_asc_lakeSuperior",
+                   "draws_asc_river","draws_b_coastal_lakeMichigan","draws_b_coastal_lakeSuperior",
+                   "draws_b_coastal_river"),
+  intraDrawsType="halton",
+  intraNDraws=0,
+  intraUnifDraws=c(),
+  intraNormDraws=c()
+)
+
+### Create random parameters
+apollo_randCoeff=function(apollo_beta, apollo_inputs){
+  randcoeff=list()
+  
+  randcoeff[["asc_fish"]]=mu_asc_fish + sigma_asc_fish*draws_asc_fish
+  randcoeff[["asc_lakeMichigan"]]=mu_asc_lakeMichigan + sigma_asc_lakeMichigan*draws_asc_lakeMichigan
+  randcoeff[["asc_lakeSuperior"]]=mu_asc_lakeSuperior + sigma_asc_lakeSuperior*draws_asc_lakeSuperior
+  randcoeff[["asc_river"]]=mu_asc_river + sigma_asc_river*draws_asc_river
+  randcoeff[["b_coastal_lakeMichigan"]]=mu_b_coastal_lakeMichigan +
+    sigma_b_coastal_lakeMichigan*draws_b_coastal_lakeMichigan
+  randcoeff[["b_coastal_lakeSuperior"]]=mu_b_coastal_lakeSuperior +
+    sigma_b_coastal_lakeSuperior*draws_b_coastal_lakeSuperior
+  randcoeff[["b_coastal_river"]]=mu_b_coastal_river + sigma_b_coastal_river*draws_b_coastal_river
+  
+  return(randcoeff)
+
+}
 
 # ################################################################# #
 #### GROUP AND VALIDATE INPUTS                                   ####
@@ -195,6 +238,9 @@ apollo_probabilities=function(apollo_beta, apollo_inputs, functionality="estimat
   ### Take product across observation for same individual
   P = apollo_panelProd(P, apollo_inputs, functionality)
   
+   ### Average across inter-individual draws
+  P = apollo_avgInterDraws(P, apollo_inputs, functionality)
+  
   ### Prepare and return outputs of function
   P = apollo_prepareProb(P, apollo_inputs, functionality)
   return(P)
@@ -229,3 +275,292 @@ apollo_saveOutput(model)
 ### Print outputs of additional diagnostics to new output file (remember to close file writing when complete)
 apollo_sink()
 ```
+successful model fit, checking distribution (and correlations) of random parameters
+
+```{r}
+unconditionals=apollo_unconditionals(model, apollo_probabilities, apollo_inputs)
+conditionals=apollo_conditionals(model, apollo_probabilities, apollo_inputs)
+```
+```{r}
+asc_fish<-conditionals$asc_fish
+
+hist(asc_fish$post.mean)
+
+list2env(conditionals, envir=.GlobalEnv)
+# each param is now in env
+
+params<-data.frame(ID=asc_fish$ID,
+                   asc_fish=asc_fish$post.mean,
+                   asc_lakeMichigan=asc_lakeMichigan$post.mean,
+                   asc_lakeSuperior=asc_lakeSuperior$post.mean,
+                   asc_river=asc_river$post.mean,
+                   b_coastal_lakeMichigan=b_coastal_lakeMichigan$post.mean,
+                   b_coastal_lakeSuperior=b_coastal_lakeSuperior$post.mean,
+                   b_coastal_river=b_coastal_river$post.mean)
+
+# correlation matrix
+library(PerformanceAnalytics)
+
+chart.Correlation(params[,-1], histogram=T)
+```
+
+ah, model specification didn't allow for them to be correlated. But the real story is how this may influence model predictions. 
+
+```{r}
+model=apollo_loadModel("MMNL_participate_waterbodyType")
+
+predict_data<-data.frame(date=seq(mdy("1/1/2021"),mdy("12/31/2021"), by="days"))
+
+# eventually include a range of ages (repeated sims)
+pred_data_mean<-predict_data%>%
+  mutate(SurveyID=rep(1),
+         choice.specificLake=rep(NA),
+         day=wday(date, label=T),
+         month=month(date, label=T))%>%
+  dummy_cols(select_columns="month", remove_first_dummy=F, remove_selected_columns=T)%>%
+  mutate(weekendHoliday=ifelse(day%in%c("Sat","Sun") | date%in%holidays, 1, 0),
+         age.sc=rep(0),
+         age_weekend=weekendHoliday*age.sc,
+         coastal_lakeMichigan=0,
+         coastal_lakeSuperior=0,
+         coastal_river=0,
+         female=0)
+
+
+database<-pred_data_mean
+apollo_inputs=apollo_validateInputs()
+predictions_new=apollo_prediction(model, apollo_probabilities, apollo_inputs)
+
+```
+```{r}
+predictions_pivot<-predictions_new%>%
+  pivot_longer(cols=c(noFish:inlandLake), names_to="choice",values_to="probChoice")
+
+ggplot(predictions_pivot)+
+  geom_line(aes(x=Observation, y=probChoice, color=choice))
+
+# ok, the expected seasonal pattern is there. Filter out prob noFish to look at different waterbodies
+
+predictions_fished<-predictions_pivot%>%
+  filter(choice!="noFish")
+
+ggplot(predictions_fished)+
+  geom_line(aes(x=Observation, y=probChoice, color=choice))
+
+```
+Predicting higher peak summer participation when we incorporate individual heterogeneity
+
+```{r}
+anglerInland<-data.frame(SurveyID=c(1:3), age.sc=c(-1, 0, 1), coastal_lakeMichigan=0, coastal_lakeSuperior=0, coastal_river=0)
+anglerRiver<-data.frame(SurveyID=c(4:6), age.sc=c(-1, 0, 1), coastal_lakeMichigan=0, coastal_lakeSuperior=0, coastal_river=1)
+anglerMich<-data.frame(SurveyID=c(7:9), age.sc=c(-1, 0, 1), coastal_lakeMichigan=1, coastal_lakeSuperior=0, coastal_river=0)
+anglerSup<-data.frame(SurveyID=c(10:12), age.sc=c(-1, 0, 1), coastal_lakeMichigan=0, coastal_lakeSuperior=1, coastal_river=0)
+
+anglerSim.1<-rbind.data.frame(anglerInland, anglerRiver, anglerMich, anglerSup)%>%
+  mutate(female=1)
+
+anglerSim.2<-rbind.data.frame(anglerInland, anglerRiver, anglerMich, anglerSup)%>%
+  mutate(female=0)
+
+num.row<-nrow(anglerSim.1)+nrow(anglerSim.2)
+
+anglerSim<-rbind.data.frame(anglerSim.1, anglerSim.2)%>%
+  mutate(SurveyID=seq(1:num.row))
+
+  # then repeat each row 365 times
+
+pred_data<-anglerSim%>%
+  slice(rep(1:n(), each=365))%>%
+  mutate(date=rep(seq(mdy("1/1/2021"),mdy("12/31/2021"), by="days"), length(unique(SurveyID))),
+         choice.specificLake=rep(NA),
+         day=wday(date, label=T),
+         month=month(date, label=T))%>%
+  dummy_cols(select_columns="month", remove_first_dummy=F, remove_selected_columns=F)%>%
+  mutate(weekendHoliday=ifelse(day%in%c("Sat","Sun") | date%in%holidays, 1, 0),
+         month_Mar=ifelse(month%in%c("Mar","Nov"), 1, 0),
+         age_weekend=weekendHoliday*age.sc)
+
+         # adding dummy indicator for March in November (no observations--other shoulder season
+
+database=pred_data
+apollo_inputs=apollo_validateInputs()
+predictions=apollo_prediction(model, apollo_probabilities, apollo_inputs)
+
+predictions_pivot<-predictions%>%
+  mutate(age.sc=pred_data$age.sc,
+         coastal_lakeMichigan=pred_data$coastal_lakeMichigan,
+         coastal_lakeSuperior=pred_data$coastal_lakeSuperior,
+         coastal_river=pred_data$coastal_river,
+         female=pred_data$female)%>%
+  pivot_longer(cols=c(noFish:inlandLake), names_to="choice", values_to="choiceProb")%>%
+  mutate(choice=as.factor(choice),
+         ID=as.factor(ID),
+         age=ifelse(age.sc==-1, "younger",
+                    ifelse(age.sc==0, "average", "older")),
+         residence=ifelse(coastal_lakeMichigan==1, "lakeMichigan",
+                          ifelse(coastal_lakeSuperior==1, "lakeSuperior",
+                                 ifelse(coastal_river==1, "river", "inland"))),
+         gender=ifelse(female==1, "female","male"))%>%
+  filter(choice!="noFish")
+
+ggplot(predictions_pivot)+
+  geom_line(aes(x=Observation, y=choiceProb, color=residence, linetype=age))+
+  scale_color_manual(values=brewer.pal(n=4, "Set1"))+
+  facet_grid(choice~gender)+
+  theme_bw()
+ggsave(here::here("figures","choice.prob.sim.png"), height=12, width=16)
+
+# wide format predictions with covariates
+predictions_cov<-predictions%>%
+  mutate(gender=ifelse(pred_data$female==1, "female", "male"),
+         age.sc=pred_data$age.sc,
+         coastal_lakeMichigan=pred_data$coastal_lakeMichigan,
+         coastal_lakeSuperior=pred_data$coastal_lakeSuperior,
+         coastal_river=pred_data$coastal_river)
+
+ggplot(predictions_pivot)+
+  geom_line(aes(x=Observation, y=choiceProb, color=age, linetype=residence))+
+  scale_color_manual(values=brewer.pal(n=4, "Set1"))+
+  facet_grid(choice~gender)+
+  theme_bw()
+
+
+
+```
+and a lot more variation among individuals, obviously
+
+What does that mean for annual estimates? 
+
+
+- nothing on rivers, so leaving them out
+```{r}
+total.obs<-10000000+155581+80351
+
+inland<-10000000/total.obs
+
+great<-(155581+80351)/total.obs
+inland
+great
+
+comparison.df<-data.frame(type=rep("observed"), 
+                          waterbodyType=c("Inland lakes","Lake Michigan", "Lake Superior", "Rivers"),
+                          nTrips=c(10000000, 155581, 80351, NA))%>%
+  mutate(totalTrips=sum(nTrips, na.rm=T),
+         propTrips=nTrips/totalTrips)
+```
+model outputs (for fishing inland and great lakes) are about 98% inland, 2% great lakes. 
+
+```{r}
+coastalCounties<-read_csv(here::here("data","coastalCounties.csv"))
+
+superior<-filter(coastalCounties, waterbody=="Lake Superior")
+michigan<-filter(coastalCounties, waterbody=="Lake Michigan")
+river<-filter(coastalCounties, waterbody%in%c("Mississippi River","Wisconsin River"))
+
+# narrowing down predictions--dropping variation in age, assuming mean age for all predictions
+predictions_meanAge<-predictions_cov%>%
+  cbind.data.frame(dplyr::select(pred_data, month, month_Jan:month_Dec, weekendHoliday))%>%
+  filter(age.sc==0)
+
+# pulling out distinct predictions (i.e. by month and weekday type) for join to effort estimate data
+predictions_distinct<-predictions_meanAge%>%
+  select(ID, noFish:weekendHoliday)%>%
+  distinct()
+
+yearDates<-data.frame(date=seq(mdy("1/1/2021"),mdy("12/31/2021"), by="days"))%>%
+  mutate(month=month(date, label=T),
+         wday=wday(date, label=T),
+         weekendHoliday=ifelse(wday%in%c("Sat","Sun") | date%in%holidays, 1, 0))%>%
+  group_by(month, weekendHoliday)%>%
+  summarize(n=n())
+
+gender<-rep(c("female","male"), 4)
+
+
+pop<-read_csv(here::here("data","license.sales.county.gender.csv"))%>%
+  filter(ProcessYear==2022)%>%
+  mutate(coastal_lakeSuperior=ifelse(PrimaryCounty%in%superior$county, 1, 0),
+         coastal_lakeMichigan=ifelse(PrimaryCounty%in%michigan$county, 1, 0),
+         coastal_river=ifelse(PrimaryCounty%in%river$county, 1, 0),
+         Gender=tolower(Gender))%>%
+  rename("gender"=Gender,
+         "county"=PrimaryCounty)%>%
+  group_by(gender, coastal_lakeSuperior, coastal_lakeMichigan, coastal_river)%>%
+  summarize(population=sum(Count))%>%
+  ungroup()%>%
+  mutate(age=rep(0),
+         stratumID=seq(1:8))%>%
+    slice(rep(1:n(), each=24))%>%
+  mutate(month=rep(yearDates$month, 8),
+         weekendHoliday=rep(yearDates$weekendHoliday, 8),
+         nDays=rep(yearDates$n, 8))%>%
+  dummy_cols(select_columns="month", remove_first_dummy=F, remove_selected_columns=F)%>%
+  # no November observations--set to March to account for shoulder season
+  mutate(month_March=ifelse(month%in%c("Nov","Mar"),1,0))%>%
+
+  # now join to the choice probability predictions by month, weekendHoliday, coastal vars, and gender
+  left_join(predictions_distinct[,c("month","weekendHoliday","coastal_lakeMichigan",
+                                    "coastal_lakeSuperior","coastal_river","gender",
+                                    "noFish","river","lakeMichigan","lakeSuperior",
+                                    "inlandLake")], by=c("month","weekendHoliday", 
+                                    "coastal_lakeMichigan",
+                                    "coastal_lakeSuperior","coastal_river","gender"))%>%
+  #Then multiply prob by stratum population, multiply that by days in the stratum, and add across strata to get annual estimates
+  mutate(nLatentDays=population*nDays,
+         nNoFishingDays=nLatentDays*noFish,
+         nRiverDays=nLatentDays*river,
+         nLakeMichiganDays=nLatentDays*lakeMichigan,
+         nLakeSuperiorDays=nLatentDays*lakeSuperior,
+         nInlandDays=nLatentDays*inlandLake)
+
+
+
+nLatent<-sum(pop$nLatentDays)
+nNoFish<-sum(pop$nNoFishingDays)
+nLakeMichigan<-sum(pop$nLakeMichiganDays)
+nLakeSuperior<-sum(pop$nLakeSuperiorDays)
+nRiver<-sum(pop$nRiverDays)
+nInland<-sum(pop$nInlandDays)
+
+
+comparison.df.2<-data.frame(type="predicted", 
+                            waterbodyType=comparison.df$waterbodyType,
+                            nTrips=c(nInland, nLakeMichigan, nLakeSuperior, nRiver))%>%
+  mutate(totalTrips=sum(nTrips, na.rm=T),
+         propTrips=nTrips/totalTrips)
+
+comparison.bind<-rbind.data.frame(comparison.df, comparison.df.2)
+
+comparison.df.3<-comparison.df%>%
+  filter(waterbodyType!="Rivers")
+comparison.df.4<-data.frame(type="predicted", 
+                            waterbodyType=comparison.df$waterbodyType[-4],
+                            nTrips=c(nInland, nLakeMichigan, nLakeSuperior))%>%
+  mutate(totalTrips=sum(nTrips, na.rm=T),
+         propTrips=nTrips/totalTrips)
+
+comparison.bind.noRiver<-rbind.data.frame(comparison.df.3, comparison.df.4)
+
+```
+
+Graph of total trip numbers
+
+'observed' comes from 2001 DNR report on a mail survey--around 11000000 annual trips on inland lakes *and* rivers, both resident and nonresident
+
+```{r}
+ggplot(comparison.bind)+
+  geom_bar(aes(x=waterbodyType, y=nTrips, fill=type), stat="identity", position=position_dodge())+
+  scale_fill_manual(values=brewer.pal(2, "Set1"))+
+  theme_bw()
+ggsave(here::here("figures","observed.vs.predicted.nTrips.png"), height=4, width=6)
+```
+and proportions for comparison
+
+```{r}
+ggplot(comparison.bind.noRiver)+
+  geom_bar(aes(x=type, y=propTrips, fill=waterbodyType), stat="identity")+
+  scale_fill_manual(values=brewer.pal(3, "Paired"))+
+  theme_bw()
+ggsave(here::here("figures","observed.vs.predicted.prop.png"), height=4, width=6)
+```
+wow, that's weirdly close. Don't get excited though, the 'observations' for inland lakes aren't totally comparable. There are known issues creeling the Great Lakes in WI, which might explain the 'overprediction' of fishign effort there by this model, but who knows
